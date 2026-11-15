@@ -147,6 +147,15 @@ void Renderer::notifyGpuCopyDone() const {
     }
 }
 
+// Tells the X server this renderer has its next buffer and can draw at once: the server makes
+// the flush it held back for that (see rendererBusy).
+void Renderer::notifyRendererReady() const {
+    if (connFdPtr && *connFdPtr != -1) {
+        lorieEvent e = { .type = EVENT_RENDERER_READY };
+        write(*connFdPtr, &e, sizeof(e));
+    }
+}
+
 void Renderer::bindTexture(GLuint id) const {
     glBindTexture(GL_TEXTURE_2D, id);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filtering);
@@ -1016,6 +1025,9 @@ void Renderer::redrawLocked(bool* waitingForBuffers) {
     reportViewport(renderViewportX, renderViewportY, renderViewportW, renderViewportH,
                    sourceLeft, sourceTop, logicalSourceWidth, logicalSourceHeight);
 
+    // From here until the next buffer is there this renderer can't make another draw: the X
+    // server holds its flushes back meanwhile.
+    __atomic_store_n(&state->rendererBusy, TRUE, __ATOMIC_SEQ_CST);
     // We should signal X server to not use root window while we actively copy it
     lorie_mutex_lock(&state->lock, &state->lockingPid);
     // Share this draw's flush+fence below instead of a separate round trip per frame.
@@ -1067,6 +1079,12 @@ void Renderer::redrawLocked(bool* waitingForBuffers) {
     glDisable(GL_SCISSOR_TEST);
     fence = eglCreateSyncKHR(egl_display, EGL_SYNC_FENCE_KHR, nullptr);
     waitForFence(egl_display, fence, EGL_SYNC_FLUSH_COMMANDS_BIT_KHR);
+
+    // The next buffer is there. The flag goes before the look for the server's word, as the
+    // server leaves its word before it reads the flag: one of the two always sees the other.
+    __atomic_store_n(&state->rendererBusy, FALSE, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&state->flushWanted, __ATOMIC_SEQ_CST))
+        notifyRendererReady();
 
     state->renderedFrames++;
 }
@@ -1124,9 +1142,11 @@ void Renderer::threadLoop() {
             stateChanged = false;
             waitingForBuffers = false;
 
-            if (state)
+            if (state) {
                 state->surfaceAvailable = win != defaultWin;
-            else if (win != defaultWin) {
+                // A renderer before this one may have ended in the middle of a draw.
+                __atomic_store_n(&state->rendererBusy, FALSE, __ATOMIC_SEQ_CST);
+            } else if (win != defaultWin) {
                 glClearColor(0, 0, 0, 0);
                 glClear(GL_COLOR_BUFFER_BIT);
                 eglSwapBuffers(egl_display, sfc);

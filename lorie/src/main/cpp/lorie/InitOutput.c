@@ -88,6 +88,9 @@ typedef struct {
 
     uint64_t gpuCopySerialCounter;
     uint64_t rootGpuCopyPending;
+
+    // Since when (GetTimeInMicros) a flush has been left to the renderer's word (see rendererBusy); 0 when none is.
+    uint64_t flushDeferredSince;
 } lorieScreenInfo;
 
 ScreenPtr pScreenPtr;
@@ -511,25 +514,25 @@ static miPointerScreenFuncRec loriePointerCursorFuncs = {
 
 static void loriePerformVblanks(void);
 
-static Bool lorieRedraw(__unused ClientPtr pClient, __unused void *closure) {
+// A renderer that hasn't asked for its flush after this long (three refreshes at 60 Hz) is taken
+// for gone or stuck, and the flush is made without its word, as it was before the renderer had one.
+#define LORIE_FLUSH_PATIENCE_US 50000
+
+// Hands the renderer the root window as it is now, if it changed, and wakes it for the draw.
+static void lorieFlush(void) {
     int status, nonEmpty;
     LoriePixmapPriv* priv;
     PixmapPtr root = pScreenPtr && pScreenPtr->root ? pScreenPtr->GetWindowPixmap(pScreenPtr->root) : NULL;
 
-    pvfb->current_msc++;
-    loriePerformVblanks();
-
-    pvfb->state->waitForNextFrame = false;
-
-    if (!lorieConnectionAlive() || !pvfb->state->surfaceAvailable)
-        return TRUE;
+    pvfb->flushDeferredSince = 0;
+    __atomic_store_n(&pvfb->state->flushWanted, FALSE, __ATOMIC_SEQ_CST);
 
     nonEmpty = RegionNotEmpty(DamageRegion(pvfb->damage));
     priv = root ? exaGetPixmapDriverPrivate(root) : NULL;
 
     if (!priv)
         // Impossible situation, but let's skip this step
-        return TRUE;
+        return;
 
     if (nonEmpty && priv->buffer) {
         // We should unlock and lock buffer in order to update texture content on some devices
@@ -558,8 +561,46 @@ static Bool lorieRedraw(__unused ClientPtr pClient, __unused void *closure) {
         // Renderer thread will check the `drawRequested` flag right before going to sleep.
         pthread_cond_signal(rendererCond);
     }
+}
 
+static Bool lorieRedraw(__unused ClientPtr pClient, __unused void *closure) {
+    pvfb->current_msc++;
+    loriePerformVblanks();
+
+    pvfb->state->waitForNextFrame = false;
+
+    if (!lorieConnectionAlive() || !pvfb->state->surfaceAvailable)
+        return TRUE;
+
+    // A renderer still waiting for its next buffer would leave a flush pending until it has it,
+    // and the root window closed to writes for as long: it gets word that one is wanted instead,
+    // and asks for it when it can draw (lorieRendererReady). The word is left before its flag is
+    // read, and the renderer clears its flag before it looks for the word, so one of the two
+    // always sees the other.
+    if (RegionNotEmpty(DamageRegion(pvfb->damage))) {
+        uint64_t now = GetTimeInMicros();
+        if (!pvfb->flushDeferredSince || now - pvfb->flushDeferredSince < LORIE_FLUSH_PATIENCE_US) {
+            __atomic_store_n(&pvfb->state->flushWanted, TRUE, __ATOMIC_SEQ_CST);
+            if (__atomic_load_n(&pvfb->state->rendererBusy, __ATOMIC_SEQ_CST)) {
+                if (!pvfb->flushDeferredSince)
+                    pvfb->flushDeferredSince = now;
+                return TRUE;
+            }
+        }
+    }
+
+    lorieFlush();
     return TRUE;
+}
+
+// On the X server thread, when the renderer says it has its next buffer (EVENT_RENDERER_READY):
+// the flush a refresh left to it, if one still is.
+void lorieRendererReady(void) {
+    if (!pScreenPtr || !pvfb->state || !pvfb->state->flushWanted)
+        return;
+    if (!lorieConnectionAlive() || !pvfb->state->surfaceAvailable)
+        return;
+    lorieFlush();
 }
 
 static uint64_t gpuCopyAttempts = 0, gpuCopyOffloads = 0;

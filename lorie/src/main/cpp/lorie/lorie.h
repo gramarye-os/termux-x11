@@ -36,6 +36,7 @@ void lorieSetStylusEnabled(Bool enabled);
 void lorieSyncLockKeysState(uint8_t state);
 void lorieWakeServer(void);
 void lorieRecheckGpuCopies(void);
+void lorieRendererReady(void);
 void lorieChoreographerFrameCallback(__unused long t, AChoreographer* d);
 void lorieActivityConnected(void);
 void lorieSendSharedServerState(int memfd);
@@ -115,6 +116,7 @@ typedef enum {
     EVENT_LOCK_KEYS_STATE,
     EVENT_SYNC,
     EVENT_SYNC_REPLY,
+    EVENT_RENDERER_READY,
 } eventType;
 
 typedef union {
@@ -245,6 +247,21 @@ struct lorie_shared_server_state {
      */
     volatile uint8_t waitForNextFrame;
 
+    /*
+     * The renderer draws in a millisecond and then waits most of a refresh for Android to hand it
+     * the next buffer. A draw the X server flushed for meanwhile isn't made until then, and the
+     * server, which doesn't write the root window while a flushed draw is pending (renderPending),
+     * slept through every refresh as soon as one client repainted in each: all clients' requests
+     * waited with it, and a round trip took a refresh.
+     * So the server flushes for a draw only while rendererBusy is clear, which the renderer sets
+     * from its draw until it has its next buffer. When it's set and there is something to draw the
+     * server sets flushWanted instead, and the renderer, on getting its buffer, tells it
+     * (EVENT_RENDERER_READY) to flush then: the draw follows at once, and the server's writes wait
+     * for no longer than it takes.
+     */
+    volatile uint8_t rendererBusy;
+    volatile uint8_t flushWanted;
+
     /* Needed to show FPS counter in logcat */
     volatile int renderedFrames;
 
@@ -366,6 +383,7 @@ struct Renderer {
     void threadLoop();
     void bindTexture(GLuint id) const;
     void notifyGpuCopyDone() const;
+    void notifyRendererReady() const;
     void reportViewport(int dstX, int dstY, int dstW, int dstH, float left, float top, float width, float height);
     void drawRegion(GLuint id, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1, uint8_t flip);
     void drawCursor(float displayWidth, float displayHeight, float sourceLeft, float sourceTop, float cursorX, float cursorY);
