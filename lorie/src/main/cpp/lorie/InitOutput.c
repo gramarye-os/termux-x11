@@ -117,6 +117,8 @@ typedef struct {
     bool flipped, wasLocked, imported;
     void *locked;
     void *mem;
+    // The Present of this pixmap that is being held back, and since when (see lorieHoldPresent).
+    uint64_t heldPresent, heldSince;
 } LoriePixmapPriv;
 
 #define LORIE_PIXMAP_PRIV_FROM_PIXMAP(pixmap) (pixmap ? ((LoriePixmapPriv*) exaGetPixmapDriverPrivate(pixmap)) : NULL)
@@ -1054,6 +1056,41 @@ Bool lorieTryScheduleGpuCopy(PixmapPtr pixmap, PixmapPtr dst, RegionPtr update, 
     gpuCopyAttempts++;
     gpuCopyOffloads++;
     return TRUE;
+}
+
+// How old a Present of a client's GPU buffer has to be before the buffer is read.
+#define LORIE_PRESENT_SETTLE_US 4000
+
+/*
+ * Whether the Present [id] of [pixmap] has to wait for a later vsync (present_execute_copy asks
+ * each time it comes to it).
+ * A client's GL driver sends the Present when it has handed its drawing to the GPU, not when the
+ * GPU is done with it, and counts on the kernel to make a reader of the buffer wait. An Android
+ * GPU driver (kgsl) doesn't: read at once, the buffer has the frame before, or part of each, and
+ * that is what got copied to the screen - seen as tearing, in most frames of a client that draws
+ * for a millisecond. Nothing tells this server when the GPU is done, so the buffer is left alone
+ * for the time light drawing takes: never read in the request that presents it, and not before
+ * it is LORIE_PRESENT_SETTLE_US old. Drawing that takes the GPU longer than that still tears; only
+ * the client's driver, waiting for its GPU before it presents, can rule that out.
+ */
+Bool lorieHoldPresent(PixmapPtr pixmap, uint64_t id) {
+    LoriePixmapPriv *priv = LORIE_PIXMAP_PRIV_FROM_PIXMAP(pixmap);
+    uint64_t now;
+
+    // Buffers of this server's own making are drawn by it, and are whole when a request is done.
+    if (!priv || !priv->imported)
+        return FALSE;
+    // The held Present comes up again at a vsync, and there are none to count on without a renderer.
+    if (!lorieConnectionAlive() || !lorieRendererAvailable())
+        return FALSE;
+
+    now = GetTimeInMicros();
+    if (priv->heldPresent != id) {
+        priv->heldPresent = id;
+        priv->heldSince = now;
+        return TRUE;
+    }
+    return now - priv->heldSince < LORIE_PRESENT_SETTLE_US;
 }
 
 Bool lorieGpuCopyIsDone(uint64_t serial) {
