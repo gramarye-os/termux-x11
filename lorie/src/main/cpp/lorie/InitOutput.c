@@ -24,6 +24,7 @@
 #include <dri3.h>
 #include <sys/stat.h>
 #include <dlfcn.h>
+#include <sys/system_properties.h>
 #include "fb.h"
 #include "inputstr.h"
 #include "mipointer.h"
@@ -1058,8 +1059,28 @@ Bool lorieTryScheduleGpuCopy(PixmapPtr pixmap, PixmapPtr dst, RegionPtr update, 
     return TRUE;
 }
 
-// How old a Present of a client's GPU buffer has to be before the buffer is read.
+// How old a Present of a client's GPU buffer has to be before the buffer is read, and the Android
+// property that sets another age in microseconds (0: such Presents are not held at all). The
+// property is read again each second, so a running server follows
+//   setprop debug.termux_x11.present_settle_us 0
 #define LORIE_PRESENT_SETTLE_US 4000
+#define LORIE_PRESENT_SETTLE_MAX_US 100000
+#define LORIE_PRESENT_SETTLE_PROP "debug.termux_x11.present_settle_us"
+
+static uint64_t loriePresentSettleUs(uint64_t now) {
+    static uint64_t settle = LORIE_PRESENT_SETTLE_US, readAt;
+    char value[PROP_VALUE_MAX];
+
+    if (!readAt || now - readAt >= 1000000) {
+        readAt = now ? now : 1;
+        settle = LORIE_PRESENT_SETTLE_US;
+        if (__system_property_get(LORIE_PRESENT_SETTLE_PROP, value) > 0 && value[0] >= '0' && value[0] <= '9')
+            settle = strtoull(value, NULL, 10);
+        if (settle > LORIE_PRESENT_SETTLE_MAX_US)
+            settle = LORIE_PRESENT_SETTLE_MAX_US;
+    }
+    return settle;
+}
 
 /*
  * Whether the Present [id] of [pixmap] has to wait for a later vsync (present_execute_copy asks
@@ -1071,11 +1092,12 @@ Bool lorieTryScheduleGpuCopy(PixmapPtr pixmap, PixmapPtr dst, RegionPtr update, 
  * for a millisecond. Nothing tells this server when the GPU is done, so the buffer is left alone
  * for the time light drawing takes: never read in the request that presents it, and not before
  * it is LORIE_PRESENT_SETTLE_US old. Drawing that takes the GPU longer than that still tears; only
- * the client's driver, waiting for its GPU before it presents, can rule that out.
+ * the client's driver, waiting for its GPU before it presents, can rule that out. Where every
+ * client's driver does wait, the hold is a vsync of delay for nothing, and the property turns it off.
  */
 Bool lorieHoldPresent(PixmapPtr pixmap, uint64_t id) {
     LoriePixmapPriv *priv = LORIE_PIXMAP_PRIV_FROM_PIXMAP(pixmap);
-    uint64_t now;
+    uint64_t now, settle;
 
     // Buffers of this server's own making are drawn by it, and are whole when a request is done.
     if (!priv || !priv->imported)
@@ -1085,12 +1107,15 @@ Bool lorieHoldPresent(PixmapPtr pixmap, uint64_t id) {
         return FALSE;
 
     now = GetTimeInMicros();
+    settle = loriePresentSettleUs(now);
+    if (!settle)
+        return FALSE;
     if (priv->heldPresent != id) {
         priv->heldPresent = id;
         priv->heldSince = now;
         return TRUE;
     }
-    return now - priv->heldSince < LORIE_PRESENT_SETTLE_US;
+    return now - priv->heldSince < settle;
 }
 
 Bool lorieGpuCopyIsDone(uint64_t serial) {
