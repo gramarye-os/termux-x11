@@ -456,6 +456,14 @@ void handleLorieEvents(int fd, __unused int ready, __unused void *ignored) {
                 }, nullptr, nullptr);
                 lorieWakeServer();
                 break;
+            case EVENT_RENDERER_READY:
+                QueueWorkProc(+[](__unused ClientPtr pClient, __unused void *closure) -> Bool {
+                    // This must be done only on X server thread (flushes the root window).
+                    lorieRendererReady();
+                    return TRUE;
+                }, nullptr, nullptr);
+                lorieWakeServer();
+                break;
             case EVENT_SYNC: {
                 auto serial = (uintptr_t) e.sync.serial;
                 QueueWorkProc(+[](__unused ClientPtr pClient, void *closure) -> Bool {

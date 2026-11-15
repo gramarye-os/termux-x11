@@ -36,6 +36,7 @@ void lorieSetStylusEnabled(Bool enabled);
 void lorieSyncLockKeysState(uint8_t state);
 void lorieWakeServer(void);
 void lorieRecheckGpuCopies(void);
+void lorieRendererReady(void);
 void lorieChoreographerFrameCallback(__unused long t, AChoreographer* d);
 void lorieActivityConnected(void);
 void lorieSendSharedServerState(int memfd);
@@ -115,6 +116,7 @@ typedef enum {
     EVENT_LOCK_KEYS_STATE,
     EVENT_SYNC,
     EVENT_SYNC_REPLY,
+    EVENT_RENDERER_READY,
 } eventType;
 
 typedef union {
@@ -245,6 +247,19 @@ struct lorie_shared_server_state {
      */
     volatile uint8_t waitForNextFrame;
 
+    /*
+     * After a draw, the renderer waits most of a frame for its next buffer from Android. A flush
+     * sent during that wait stays pending (renderPending) until the wait ends, and the X server
+     * blocks root window writes while a flush is pending. With a client that repaints every
+     * frame, the server was blocked most of the time and all clients stalled.
+     *
+     * rendererBusy: set by the renderer from its draw until it has its next buffer.
+     * flushWanted: set by the server when it has damage but the renderer is busy. The renderer
+     * then sends EVENT_RENDERER_READY when it is free, and the server flushes.
+     */
+    volatile uint8_t rendererBusy;
+    volatile uint8_t flushWanted;
+
     /* Needed to show FPS counter in logcat */
     volatile int renderedFrames;
 
@@ -366,6 +381,7 @@ struct Renderer {
     void threadLoop();
     void bindTexture(GLuint id) const;
     void notifyGpuCopyDone() const;
+    void notifyRendererReady() const;
     void reportViewport(int dstX, int dstY, int dstW, int dstH, float left, float top, float width, float height);
     void drawRegion(GLuint id, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1, uint8_t flip);
     void drawCursor(float displayWidth, float displayHeight, float sourceLeft, float sourceTop, float cursorX, float cursorY);
