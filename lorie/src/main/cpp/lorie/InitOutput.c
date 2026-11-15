@@ -1059,21 +1059,27 @@ Bool lorieTryScheduleGpuCopy(PixmapPtr pixmap, PixmapPtr dst, RegionPtr update, 
     return TRUE;
 }
 
-// How old a Present of a client's GPU buffer has to be before the buffer is read, and the Android
-// property that sets another age in microseconds (0: such Presents are not held at all). The
-// property is read again each second, so a running server follows
+// How old a Present of a client's GPU buffer has to be before the buffer is read, in microseconds
+// (0: such Presents are not held at all). Whoever starts the server and knows its clients' GL
+// driver sets another age in the server's environment; the Android property is for trying one on
+// a running server, goes before the environment, and is read again each second:
 //   setprop debug.termux_x11.present_settle_us 0
 #define LORIE_PRESENT_SETTLE_US 4000
 #define LORIE_PRESENT_SETTLE_MAX_US 100000
+#define LORIE_PRESENT_SETTLE_ENV "TERMUX_X11_PRESENT_SETTLE_US"
 #define LORIE_PRESENT_SETTLE_PROP "debug.termux_x11.present_settle_us"
 
 static uint64_t loriePresentSettleUs(uint64_t now) {
     static uint64_t settle = LORIE_PRESENT_SETTLE_US, readAt;
     char value[PROP_VALUE_MAX];
+    const char *env;
 
     if (!readAt || now - readAt >= 1000000) {
         readAt = now ? now : 1;
         settle = LORIE_PRESENT_SETTLE_US;
+        env = getenv(LORIE_PRESENT_SETTLE_ENV);
+        if (env && env[0] >= '0' && env[0] <= '9')
+            settle = strtoull(env, NULL, 10);
         if (__system_property_get(LORIE_PRESENT_SETTLE_PROP, value) > 0 && value[0] >= '0' && value[0] <= '9')
             settle = strtoull(value, NULL, 10);
         if (settle > LORIE_PRESENT_SETTLE_MAX_US)
@@ -1093,7 +1099,8 @@ static uint64_t loriePresentSettleUs(uint64_t now) {
  * for the time light drawing takes: never read in the request that presents it, and not before
  * it is LORIE_PRESENT_SETTLE_US old. Drawing that takes the GPU longer than that still tears; only
  * the client's driver, waiting for its GPU before it presents, can rule that out. Where every
- * client's driver does wait, the hold is a vsync of delay for nothing, and the property turns it off.
+ * client's driver does wait, the hold is a vsync of delay for nothing: who starts the server for
+ * such clients sets LORIE_PRESENT_SETTLE_ENV to 0.
  */
 Bool lorieHoldPresent(PixmapPtr pixmap, uint64_t id) {
     LoriePixmapPriv *priv = LORIE_PIXMAP_PRIV_FROM_PIXMAP(pixmap);
