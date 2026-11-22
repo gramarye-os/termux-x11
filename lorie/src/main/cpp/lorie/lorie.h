@@ -318,6 +318,11 @@ struct Renderer {
     jclass lorieViewClass = nullptr;
     jobject thiz = nullptr; // global ref to the owning LorieView
     jmethodID setRendererViewportMethod = nullptr;
+    // The cursor drawn by the view's owner, above whatever it lays over the X screen, rather than
+    // here into the screen's own surface: see setCursorOverlay.
+    volatile bool cursorOverlay = false;
+    jmethodID cursorChangedMethod = nullptr;
+    int reportedCursorX = -1, reportedCursorY = -1, reportedCursorVisible = -1;
     int reportedViewportX = -1, reportedViewportY = -1, reportedViewportW = -1, reportedViewportH = -1;
     float reportedSourceLeft = -1.f, reportedSourceTop = -1.f, reportedSourceWidth = -1.f, reportedSourceHeight = -1.f;
 
@@ -373,6 +378,8 @@ struct Renderer {
     void setZoomAnchor(float sourceX, float sourceY, float fracX, float fracY);
     void clearZoomAnchor();
     void setFollowCursorPan(bool enabled);
+    void setCursorOverlay(bool enabled);
+    void reportCursor(int x, int y, bool imageChanged);
     void releaseWinAndSurface(ANativeWindow** anw, EGLSurface* esfc);
     void refreshContext();
     LorieBuffer* findBufferWithRetry(uint64_t id);

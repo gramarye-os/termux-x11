@@ -719,6 +719,8 @@ public class LorieView extends SurfaceView implements InputStub {
     @FastNative private native void clearZoomAnchor(long ptr);
     @FastNative private native void setFollowCursorPan(long ptr, boolean enabled);
     @FastNative private native long getCursorPosition(long ptr);
+    @FastNative private native void setCursorOverlay(long ptr, boolean enabled);
+    @FastNative private native byte[] getCursorImage(long ptr, int[] meta);
     @FastNative private native void sendSync(long ptr, int serial);
 
     // Public API stays free of the native pointer; it's threaded through to an overload below.
@@ -757,6 +759,74 @@ public class LorieView extends SurfaceView implements InputStub {
     public PointF getRealCursorPosition() {
         long packed = getCursorPosition(mNativeContext);
         return new PointF((float) (packed >>> 32), (float) (packed & 0xFFFFFFFFL));
+    }
+
+    /** The X cursor, for an owner that draws it itself; see {@link #setCursorOverlay}. */
+    public interface CursorListener {
+        /**
+         * Called on the main thread. {@code x}, {@code y}: the cursor's hot spot in this view's
+         * pixels; {@code scale}: view pixels per X pixel, for its picture.
+         */
+        void onCursorMoved(float x, float y, float scale, boolean visible);
+        /** The cursor's picture changed ({@code null}: none), with its hot spot in the picture's pixels. */
+        void onCursorImage(android.graphics.Bitmap image, int hotX, int hotY);
+    }
+    private volatile CursorListener mCursorListener;
+
+    /**
+     * With a listener, the X cursor is no longer drawn into this view: the listener is told where
+     * it is and what it looks like, and draws it, above whatever lies over this view (a desktop's
+     * dock would hide it). {@code null} goes back to drawing it here.
+     */
+    public void setCursorOverlay(CursorListener listener) {
+        mCursorListener = listener;
+        setCursorOverlay(mNativeContext, listener != null);
+        if (listener != null)
+            MainActivity.handler.post(() -> deliverCursorImage(listener));
+    }
+
+    private void deliverCursorImage(CursorListener listener) {
+        int[] meta = new int[4];
+        byte[] pixels = getCursorImage(mNativeContext, meta);
+        android.graphics.Bitmap image = null;
+        if (pixels != null && meta[0] > 0 && meta[1] > 0 && pixels.length == meta[0] * meta[1] * 4) {
+            // As the renderer blends it: straight alpha, bytes in R, G, B, A order.
+            int[] argb = new int[meta[0] * meta[1]];
+            for (int i = 0, j = 0; i < argb.length; i++, j += 4)
+                argb[i] = (pixels[j + 3] & 0xFF) << 24 | (pixels[j] & 0xFF) << 16 | (pixels[j + 1] & 0xFF) << 8 | (pixels[j + 2] & 0xFF);
+            image = android.graphics.Bitmap.createBitmap(argb, meta[0], meta[1], android.graphics.Bitmap.Config.ARGB_8888);
+        }
+        listener.onCursorImage(image, meta[2], meta[3]);
+    }
+
+    /**
+     * Moves the X pointer to a point of this view, in its pixels, without a click: for an owner
+     * that takes a mouse's events over part of the view for itself and still wants the pointer
+     * to follow.
+     */
+    public void movePointerToView(float viewX, float viewY) {
+        if (inputViewport.width() <= 0 || inputViewport.height() <= 0 || inputSourceWidth <= 0 || inputSourceHeight <= 0)
+            return;
+        float x = inputSourceLeft + (viewX - inputViewport.left) * inputSourceWidth / inputViewport.width();
+        float y = inputSourceTop + (viewY - inputViewport.top) * inputSourceHeight / inputViewport.height();
+        sendMouseEvent(Math.max(0f, x), Math.max(0f, y), BUTTON_UNDEFINED, false, false);
+    }
+
+    /** Called by the renderer, on its thread, while a cursor overlay is set. @noinspection unused */
+    @Keep
+    private void cursorChanged(int x, int y, boolean visible, boolean imageChanged) {
+        MainActivity.handler.post(() -> {
+            CursorListener listener = mCursorListener;
+            if (listener == null)
+                return;
+            if (imageChanged)
+                deliverCursorImage(listener);
+            // The same mapping input uses the other way: the part of the X screen shown, onto the viewport.
+            float scaleX = inputSourceWidth > 0 ? inputViewport.width() / inputSourceWidth : 1f;
+            float scaleY = inputSourceHeight > 0 ? inputViewport.height() / inputSourceHeight : 1f;
+            listener.onCursorMoved(inputViewport.left + (x - inputSourceLeft) * scaleX,
+                    inputViewport.top + (y - inputSourceTop) * scaleY, scaleX, visible);
+        });
     }
 
     public interface SyncListener { void onSyncReply(int serial); }

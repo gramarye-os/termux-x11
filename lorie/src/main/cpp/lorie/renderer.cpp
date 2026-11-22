@@ -322,6 +322,7 @@ void Renderer::init(JNIEnv* env, jobject view) {
     jclass clazz = env->FindClass("com/termux/x11/LorieView");
     lorieViewClass = (jclass) env->NewGlobalRef(clazz);
     setRendererViewportMethod = env->GetMethodID(lorieViewClass, "setRendererViewport", "(IIIIFFFF)V");
+    cursorChangedMethod = env->GetMethodID(lorieViewClass, "cursorChanged", "(IIZZ)V");
 
     pthread_mutex_init(&stateLock, nullptr);
 
@@ -693,6 +694,35 @@ void Renderer::setFollowCursorPan(bool enabled) {
     withStateLock({ followCursorPan = enabled; });
 }
 
+// With the overlay on, the cursor isn't drawn into the X screen's surface: the view's owner is
+// told where it is and draws it itself, above anything it lays over the screen (a desktop's dock
+// hid the cursor under it). The redraw this asks for takes the cursor out of, or back into, the frame.
+void Renderer::setCursorOverlay(bool enabled) {
+    withStateLock({
+        cursorOverlay = enabled;
+        reportedCursorX = reportedCursorY = reportedCursorVisible = -1;
+    });
+}
+
+void Renderer::reportCursor(int x, int y, bool imageChanged) {
+    JNIEnv* env = rendererEnv;
+    if (!env || !thiz || !cursorChangedMethod)
+        return;
+
+    int visible = state->cursor.visible && state->cursor.width && state->cursor.height ? 1 : 0;
+    if (!imageChanged && reportedCursorX == x && reportedCursorY == y && reportedCursorVisible == visible)
+        return;
+
+    reportedCursorX = x;
+    reportedCursorY = y;
+    reportedCursorVisible = visible;
+    env->CallVoidMethod(thiz, cursorChangedMethod, (jint) x, (jint) y, (jboolean) visible, (jboolean) imageChanged);
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+    }
+}
+
 void Renderer::refreshContext() {
     int width = pendingWin ? ANativeWindow_getWidth(pendingWin) : 0;
     int height = pendingWin ? ANativeWindow_getHeight(pendingWin) : 0;
@@ -1045,6 +1075,7 @@ void Renderer::redrawLocked(bool* waitingForBuffers) {
     fence = eglCreateSyncKHR(egl_display, EGL_SYNC_FENCE_KHR, nullptr);
     glFlush();
 
+    bool cursorImageChanged = false;
     if (state->cursor.updated) {
         log("Xlorie: updating cursor\n");
         lorie_mutex_lock(&state->cursor.lock, &state->cursor.lockingPid);
@@ -1052,10 +1083,14 @@ void Renderer::redrawLocked(bool* waitingForBuffers) {
         bindTexture(cursor.id);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, (GLsizei) state->cursor.width, (GLsizei) state->cursor.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, state->cursor.bits);
         lorie_mutex_unlock(&state->cursor.lock, &state->cursor.lockingPid);
+        cursorImageChanged = true;
     }
 
     state->cursor.moved = FALSE;
-    drawCursor(sourceWidth, sourceHeight, sourceLeft, sourceTop, cursorX, cursorY);
+    if (cursorOverlay)
+        reportCursor((int) cursorX, (int) cursorY, cursorImageChanged);
+    else
+        drawCursor(sourceWidth, sourceHeight, sourceLeft, sourceTop, cursorX, cursorY);
     glFlush();
 
     // Wait until root window drawing is finished before giving control back to X server

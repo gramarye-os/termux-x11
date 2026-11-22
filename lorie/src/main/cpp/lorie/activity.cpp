@@ -436,6 +436,28 @@ JNIEXPORT jint JNI_OnLoad(JavaVM *vm, __unused void *reserved) {
                 if (!r || r->destroyed) return;
                 r->renderer.setFollowCursorPan(enabled);
             }},
+            {"setCursorOverlay", "(JZ)V", (void *) +[](__unused JNIEnv *env, __unused jobject thiz, jlong ptr, jboolean enabled) {
+                auto* r = (LorieViewResources*) ptr;
+                if (!r || r->destroyed) return;
+                r->renderer.setCursorOverlay(enabled);
+            }},
+            // The cursor's picture as RGBA bytes, row by row; meta gets its width, height and hot spot.
+            {"getCursorImage", "(J[I)[B", (void *) +[](JNIEnv *env, __unused jobject thiz, jlong ptr, jintArray meta) -> jbyteArray {
+                auto* r = (LorieViewResources*) ptr;
+                if (!r || r->destroyed || !r->renderer.state || !meta || env->GetArrayLength(meta) < 4) return nullptr;
+                auto& c = r->renderer.state->cursor;
+                jbyteArray out = nullptr;
+                lorie_mutex_lock(&c.lock, &c.lockingPid);
+                jint m[4] = { (jint) c.width, (jint) c.height, (jint) c.xhot, (jint) c.yhot };
+                if (c.width && c.height && c.width <= 512 && c.height <= 512) {
+                    out = env->NewByteArray((jsize) (c.width * c.height * 4));
+                    if (out)
+                        env->SetByteArrayRegion(out, 0, (jsize) (c.width * c.height * 4), (const jbyte*) c.bits);
+                }
+                lorie_mutex_unlock(&c.lock, &c.lockingPid);
+                env->SetIntArrayRegion(meta, 0, 4, m);
+                return out;
+            }},
             {"getCursorPosition", "(J)J", (void *) +[](__unused JNIEnv *env, __unused jobject thiz, jlong ptr) -> jlong {
                 auto* r = (LorieViewResources*) ptr;
                 if (!r || r->destroyed || !r->renderer.state) return 0;
